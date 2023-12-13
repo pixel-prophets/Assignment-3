@@ -4,6 +4,11 @@ import matplotlib.pyplot as plt
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OrdinalEncoder
 import seaborn as sns
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from kmeans_feature_imp import KMeansInterp
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 class PandasSimpleImputer(SimpleImputer):
@@ -28,6 +33,7 @@ class Data:
         self.imputer = SimpleImputer(strategy="mean")
         self.encoder = OrdinalEncoder()
         self.categorical = ['Country', 'Region', 'SubRegion']
+        
 
         if year:
             self.X = self.get_year(year)
@@ -77,6 +83,7 @@ class Data:
     def handle_nulls(self):
         # dropping columns with high missing values
         to_drop = []
+        self.ctr = self.X['Country'].values
         for cols in self.X.columns:
             perc = (self.X[cols].isna().sum())/(len(self.X.index))*100
             # print(cols,perc)
@@ -107,18 +114,22 @@ class Data:
         return (Q1, Q3, iqr)
 
     def remove_outliers(self, col):
-
-        sorts = self.X[col].sort_values()
-        Q1 = sorts.quantile(0.25)
-        Q3 = sorts.quantile(0.75)
-
-        IQR = Q3-Q1
-
         prev = len(self.X.index)
+        Q1 = self.X[col].quantile(0.25)
+        Q3 = self.X[col].quantile(0.75)
+        IQR = Q3 - Q1
 
-        self.X = sorts[~((sorts < (Q1 - 1.5 * IQR)) |
-                         (sorts > (Q3 + 1.5 * IQR)))]
-
+        # identify outliers
+        threshold = 1.5
+        outliers = self.X[(self.X[col] < Q1 - threshold * IQR)
+                          | (self.X[col] > Q3 + threshold * IQR)]
+        self.X = self.X.drop(outliers.index)
+        cntt = []
+        # print(self.ctr)
+        for i in range(len(self.ctr)):
+            if i not in outliers.index:
+                cntt.append(self.ctr[i])
+        self.ctr = cntt
         print(f"{prev-len(self.X.index)} outliers were removed")
 
     def remove_all_outliers(self):
@@ -128,12 +139,123 @@ class Data:
                           (self.X > (Q3 + 1.5 * IQR))).any(axis=1)]
         print(f"{prev-len(self.X.index)} outliers were removed")
 
+    def heat_map(self):
+        c = self.X.corr()
+        sns.heatmap(c, cmap='BrBG', annot=True)
+        plt.show()
+
+
+class Model:
+    def __init__(self, clusters, Data):
+        self.X = Data.X[['Country', 'co2_mtco2', 'elect_twh',
+                         'oilcons_kbd', 'coalcons_ej', 'primary_ej']]
+
+        self.cntr = Data.ctr
+        self.X = self.X.drop(columns=['Country'])
+        self.data = self.X
+        self.X = StandardScaler().fit_transform(Data.X)
+        self.clusters = clusters
+
+    def elbow(self):
+        cost = []
+        for i in range(1, self.clusters):
+            kmean = KMeans(i, verbose=True)
+            kmean.fit(self.X)
+            cost.append(kmean.inertia_)
+        plt.plot(cost, 'bx-')
+        plt.xlabel('Number of Clusters')
+        plt.ylabel('Cost')
+        plt.show()
+
+    def fit(self):
+        # kmean = KMeans(self.clusters,verbose=True)
+        # kmean.fit(self.X)
+        # labels = kmean.labels_
+
+        # plt.show()
+        kms = KMeansInterp(
+            n_clusters=self.clusters,
+            ordered_feature_names=self.data.columns.tolist(),
+            feature_importance_method='wcss_min'
+        ).fit(self.data.values)
+        labels = kms.labels_
+        print(len(labels),len(self.data.index))
+        # self.data['Cluster'] = labels
+        # cluster_distrib = self.data['Cluster'].value_counts()
+        # sns.barplot(x=cluster_distrib.index, y=cluster_distrib.values, color='b')
+        clusters = pd.concat(
+            [self.data, pd.DataFrame({'cluster': labels})], axis=1)
+        # print(clusters[['Country', 'clusters']])
+
+        for c in clusters:
+            grid = sns.FacetGrid(clusters, col='cluster')
+            grid.map(plt.hist, c)
+        # plt.show()
+        print(kms.feature_importances_)
+
+        pca = PCA(2)
+        dist = 1 - cosine_similarity(self.X)
+        pca.fit(dist)
+        X_PCA = pca.transform(dist)
+        colors = {0: 'red',
+          1: 'blue',
+          2: 'green', 
+          3: 'yellow', 
+          4: 'orange',  
+          5:'purple'}
+
+        names = {0: 'cluster 0', 
+                1: 'cluster 1', 
+                2: 'cluster 2', 
+                3: 'cluster 3', 
+                4: 'cluster 4',
+                5:'cluster 5'}
+        
+        x, y = X_PCA[:, 0], X_PCA[:, 1]
+  
+       
+        countries = []
+        cnt = 0
+        for cr in self.cntr:
+            print(labels[cnt],cr)
+            countries.append(cr)
+            cnt+=1
+        df = pd.DataFrame({'x': x, 'y':y, 'label':labels,'Country':countries}) 
+        groups = df.groupby('label')
+
+        
+
+        fig, ax = plt.subplots(figsize=(20, 13)) 
+
+        x = []
+        y = []
+        for name, group in groups:
+            x.append(group.x)
+            y.append(group.y)
+            ax.plot(group.x, group.y, marker='o', linestyle='', ms=5,
+                    color=colors[name],label=names[name], mec='none')
+            for i in range(len(group['x'].values)):
+                ax.text(group['x'].values[i],group['y'].values[i],group['Country'].values[i])
+            ax.set_aspect('auto')
+            ax.tick_params(axis='x',which='both',bottom='off',top='off',labelbottom='off')
+            ax.tick_params(axis= 'y',which='both',left='off',top='off',labelleft='off')
+            
+        # print(x,y)
+
+        ax.legend()
+        ax.set_title("Country Segmentation based on primary energy consumption.")
+        plt.show()
+
 
 if __name__ == '__main__':
     data = Data("Energy-Data-Edited.csv", 2022)
     data.pre_process()
-    # data.remove_all_outliers()
-    # data.show_nulls()
-    data.show_outliers('elect_twh')
-    # print(data.IQR())
-    # data.remove_outliers()
+    print(data.list_features())
+    columns = ['Country', 'co2_mtco2', 'elect_twh',
+               'oilcons_kbd', 'coalcons_ej', 'primary_ej']
+    # for cols in columns[1:]:
+    #     data.remove_outliers(cols)
+        # print(data.list_features())
+    model = Model(6, data)
+    # model.elbow()
+    model.fit()
